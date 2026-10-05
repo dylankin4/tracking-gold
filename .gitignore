@@ -1,0 +1,16 @@
+# Secrets — never commit
+.env
+*.session
+*.session-journal
+
+# Runtime output
+logs/
+*.log
+
+# Build output
+.venv/
+build/
+dist/
+*.spec
+__pycache__/
+.pytest_cache/
