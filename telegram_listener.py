@@ -63,7 +63,8 @@ async def on_new_message(event):
 
 async def monitor_orders():
     """
-    Cancels a pending entry 2 as soon as entry 1 of the same signal reaches TP.
+    Cancels a pending entry 2 as soon as entry 1 of the same signal reaches TP, and moves the SL
+    of profitable positions to breakeven.
     The live price is checked every tick interval; the slower trade-history check
     (catches TPs hit while the bot was busy or offline) runs every MONITOR_INTERVAL_SECONDS.
     """
@@ -77,6 +78,7 @@ async def monitor_orders():
                 if check_history:
                     next_history_check = loop.time() + config.MONITOR_INTERVAL_SECONDS
                 mt5_handler.cancel_entry2_after_entry1_tp(check_history=check_history)
+                mt5_handler.move_sl_to_breakeven()
             else:
                 delay = 30  # back off while MT5 is unavailable
         except Exception:

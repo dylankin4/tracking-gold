@@ -42,6 +42,10 @@ TP_DISTANCES = [
 MIN_SL_DISTANCE = float(os.getenv("SIGNAL_MIN_SL_DISTANCE", "5"))
 # Max slippage allowed for market orders, in points
 MARKET_DEVIATION_POINTS = int(os.getenv("SIGNAL_DEVIATION_POINTS", "20"))
+# Once a position is this far in profit, its SL is moved to entry +/- BREAKEVEN_OFFSET
+# (BUY 4150 at 4155 -> SL 4150.5). Set SIGNAL_BREAKEVEN_TRIGGER=0 to turn this off.
+BREAKEVEN_TRIGGER = float(os.getenv("SIGNAL_BREAKEVEN_TRIGGER", "5"))
+BREAKEVEN_OFFSET = float(os.getenv("SIGNAL_BREAKEVEN_OFFSET", "0.5"))
 # How often to compare the live price with entry 1's TP (to cancel the pending entry 2)
 MONITOR_TICK_SECONDS = float(os.getenv("SIGNAL_MONITOR_TICK", "0.25"))
 # How often to also check trade history for an entry 1 already closed at TP

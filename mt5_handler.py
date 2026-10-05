@@ -1,10 +1,13 @@
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 import MetaTrader5 as mt5
 
 import mt5_terminal
 from config import (
+    BREAKEVEN_OFFSET,
+    BREAKEVEN_TRIGGER,
     LOT_SIZE,
     MAGIC_NUMBER,
     MARKET_DEVIATION_POINTS,
@@ -306,6 +309,79 @@ def close_all() -> tuple[list[int], list[int]]:
     if not closed and not cancelled:
         logger.info("Close command: no open positions or pending orders of ours")
     return closed, cancelled
+
+
+def breakeven_sl(is_buy: bool, open_price: float, current_sl: float, price: float,
+                 trigger: float, offset: float) -> float | None:
+    """
+    The SL a position should be moved to, or None if it should stay as it is.
+    `price` is the price the position would close at (bid for a BUY, ask for a SELL).
+    """
+    profit = price - open_price if is_buy else open_price - price
+    if trigger <= 0 or profit < trigger:
+        return None
+    target = open_price + offset if is_buy else open_price - offset
+    # Only ever tighten the SL; a missing SL (0) always counts as looser
+    if current_sl > 0 and (current_sl >= target if is_buy else current_sl <= target):
+        return None
+    return target
+
+
+# Position ticket -> monotonic time of the last failed SL move, so a rejected move isn't retried every tick
+_breakeven_failures: dict[int, float] = {}
+_BREAKEVEN_RETRY_SECONDS = 30
+
+
+def move_sl_to_breakeven() -> list[int]:
+    """
+    Moves the SL of every open position of ours to entry +/- BREAKEVEN_OFFSET once price
+    is BREAKEVEN_TRIGGER in profit. Returns the tickets whose SL was moved.
+    """
+    if BREAKEVEN_TRIGGER <= 0:
+        return []
+    positions = [p for p in (mt5.positions_get(symbol=SYMBOL) or ()) if p.magic == MAGIC_NUMBER]
+    if not positions:
+        return []
+    tick = mt5.symbol_info_tick(SYMBOL)
+    info = mt5.symbol_info(SYMBOL)
+    if tick is None or info is None:
+        return []
+
+    moved = []
+    now = time.monotonic()
+    for pos in positions:
+        is_buy = pos.type == mt5.POSITION_TYPE_BUY
+        price = tick.bid if is_buy else tick.ask
+        target = breakeven_sl(is_buy, pos.price_open, pos.sl, price, BREAKEVEN_TRIGGER, BREAKEVEN_OFFSET)
+        if target is None:
+            continue
+        if now - _breakeven_failures.get(pos.ticket, -_BREAKEVEN_RETRY_SECONDS) < _BREAKEVEN_RETRY_SECONDS:
+            continue
+        target = round(target, info.digits)
+
+        result = mt5.order_send({
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": SYMBOL,
+            "position": pos.ticket,
+            "sl": target,
+            "tp": pos.tp,
+        })
+        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(
+                "Breakeven: %s position %s opened @ %.2f is %.2f in profit — SL %.2f -> %.2f",
+                "BUY" if is_buy else "SELL", pos.ticket, pos.price_open,
+                abs(price - pos.price_open), pos.sl, target,
+            )
+            _breakeven_failures.pop(pos.ticket, None)
+            moved.append(pos.ticket)
+        else:
+            _breakeven_failures[pos.ticket] = now
+            logger.error(
+                "Could not move SL of position %s to %.2f (retrying in %ss): %s",
+                pos.ticket, target, _BREAKEVEN_RETRY_SECONDS,
+                f"retcode={result.retcode} {result.comment}" if result else mt5.last_error(),
+            )
+    return moved
 
 
 def _entry1_closed_at_tp(order, entry1_comment: str) -> bool:
