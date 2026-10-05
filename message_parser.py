@@ -29,6 +29,9 @@ _SL_RE = re.compile(rf"^\s*SL\s*[:\-]?\s*{_NUM}", re.IGNORECASE | re.MULTILINE)
 _TP_RE = re.compile(rf"\bTP\s*(\d*)\s*[:\-]?\s*{_NUM}", re.IGNORECASE)
 
 
+# "CLOSE SELL GOLD -90PIP", "💥CLOSE LUÔN SELL GOLD", "CLOSE HẾT SELL GOLD ENTRY, BUY TIẾP"
+_CLOSE_RE = re.compile(r"^\W*CLOSE\b", re.IGNORECASE)
+
 # An SL further than this fraction of the price from the entry is treated as a misread
 _MAX_SL_FRACTION = 0.05
 
@@ -60,6 +63,11 @@ def _complete_entry(second: str, first: float) -> float:
     base = int(first) // step * step + value
     # Pick the completion closest to the first entry (handles crossing a boundary, e.g. 4198-02 -> 4202)
     return min((base - step, base, base + step), key=lambda v: abs(v - first))
+
+
+def is_close_command(text: str) -> bool:
+    """True for messages that start with CLOSE — the channel's order to close all open trades."""
+    return bool(_CLOSE_RE.match(_normalize(text)))
 
 
 def parse_signal(text: str) -> Optional[TradeSignal]:
