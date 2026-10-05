@@ -8,7 +8,7 @@ from telethon.errors import ChannelInvalidError, ChannelPrivateError
 
 import config
 import mt5_handler
-from message_parser import parse_signal
+from message_parser import is_close_command, parse_signal
 
 logger = logging.getLogger(__name__)
 
@@ -21,27 +21,38 @@ async def on_new_message(event):
     if not text:
         return
 
+    close = is_close_command(text)
     signal = parse_signal(text)
-    if signal is None:
+    if not close and signal is None:
         logger.info("Message is not a signal, ignored: %r", text[:200])
         return
 
     age = (datetime.now(timezone.utc) - event.message.date).total_seconds()
     if age > config.MAX_SIGNAL_AGE_SECONDS:
         logger.warning(
-            "Ignoring signal from %s — %.0fs old (max %.0fs)",
+            "Ignoring %s from %s — %.0fs old (max %.0fs)",
+            "close command" if close else "signal",
             event.message.date.isoformat(), age, config.MAX_SIGNAL_AGE_SECONDS,
         )
+        return
+
+    if not mt5_handler.ensure_connected():
+        logger.error("Could not connect to MT5 — skipping %r", text[:200])
+        return
+
+    # Close first, so a message that closes and opens in one go starts from a clean slate
+    if close:
+        logger.info("Close command received: %r", text[:200])
+        closed, cancelled = mt5_handler.close_all()
+        logger.info("Close command done: closed positions=%s  cancelled orders=%s", closed, cancelled)
+
+    if signal is None:
         return
 
     logger.info(
         "Signal received: %s  entries=%s  sl=%.2f  tps=%s",
         signal.direction, signal.entry_prices, signal.stoploss, signal.take_profits,
     )
-
-    if not mt5_handler.ensure_connected():
-        logger.error("Could not connect to MT5 — skipping order placement")
-        return
 
     tickets = mt5_handler.place_orders(signal)
     if tickets:

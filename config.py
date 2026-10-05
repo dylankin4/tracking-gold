@@ -32,10 +32,10 @@ SYMBOL = os.getenv("SIGNAL_SYMBOL", "XAUUSD")
 LOT_SIZE = float(os.getenv("SIGNAL_LOT_SIZE", "0.01"))
 MAGIC_NUMBER = int(os.getenv("SIGNAL_MAGIC", "20260611"))
 ORDER_EXPIRY_HOURS = int(os.getenv("SIGNAL_EXPIRY_HOURS", "24"))
-# TP distance from entry, per entry: entry 1 -> 5, entry 2 -> 7 (e.g. BUY 4150 as entry 2 gets TP 4157)
+# TP distance from entry, per entry: entry 1 -> 7, entry 2 -> 9 (e.g. BUY 4150 as entry 2 gets TP 4159)
 TP_DISTANCES = [
-    float(os.getenv("SIGNAL_TP_DISTANCE", "5")),
-    float(os.getenv("SIGNAL_TP_DISTANCE_2", "7")),
+    float(os.getenv("SIGNAL_TP_DISTANCE", "7")),
+    float(os.getenv("SIGNAL_TP_DISTANCE_2", "9")),
 ]
 # If price already passed an entry, a market order is opened only when price is at least
 # this far from the SL; otherwise the passed entries are skipped

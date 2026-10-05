@@ -1,6 +1,6 @@
 import pytest
 
-from message_parser import parse_signal
+from message_parser import is_close_command, parse_signal
 
 # Formats seen in the signal channel (prices are examples)
 SIGNALS = [
@@ -53,6 +53,35 @@ IGNORED = [
 @pytest.mark.parametrize("text", IGNORED)
 def test_ignores_non_signal(text):
     assert parse_signal(text) is None
+
+
+CLOSE_COMMANDS = [
+    "CLOSE SELL GOLD -90PIP",
+    "CLOSE BUY GOLD +30PIP\nChốt lời nghỉ ngơi thôi nhé cả nhà",
+    "CLOSE LUÔN SELL GOLD +20PIP",
+    "CLOSE HẾT SELL GOLD ENTRY, BUY TIẾP",
+    "CLOSE BUY GOLD ENTRY\nChờ BUY tại 4365-4370",
+    "💥 CLOSE SELL GOLD",
+    "close sell gold",
+]
+
+NOT_CLOSE_COMMANDS = [
+    "📊PHÂN TÍCH GOLD\nGiá vàng kết thúc phiên hôm qua đóng cửa tại 4274$/OUNCE",
+    "Vừa đóng buy xong cậu phi lên lãi buy luôn",
+    "GOLD SELL LÃI +90PIP, sẽ CLOSE sau",
+    "CLOSED market today",
+    "💰SELL GOLD @ 4400\nSL 4415",
+]
+
+
+@pytest.mark.parametrize("text", CLOSE_COMMANDS)
+def test_detects_close_command(text):
+    assert is_close_command(text)
+
+
+@pytest.mark.parametrize("text", NOT_CLOSE_COMMANDS)
+def test_ignores_non_close_message(text):
+    assert not is_close_command(text)
 
 
 def test_take_profits_are_collected_in_order():

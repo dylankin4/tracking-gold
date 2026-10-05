@@ -238,6 +238,76 @@ def place_orders(signal: TradeSignal) -> list[int]:
     return tickets
 
 
+# Retcodes worth retrying a market close on: the price moved before the order arrived
+_RETRY_RETCODES = {mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_PRICE_CHANGED, mt5.TRADE_RETCODE_PRICE_OFF}
+
+
+def _close_position(pos) -> bool:
+    is_buy = pos.type == mt5.POSITION_TYPE_BUY
+    result = None
+    for _ in range(3):
+        tick = mt5.symbol_info_tick(SYMBOL)
+        if tick is None:
+            logger.error("No tick data to close position %s: %s", pos.ticket, mt5.last_error())
+            return False
+        result = mt5.order_send({
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": SYMBOL,
+            "volume": pos.volume,
+            "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+            "position": pos.ticket,
+            "price": tick.bid if is_buy else tick.ask,
+            "deviation": MARKET_DEVIATION_POINTS,
+            "magic": MAGIC_NUMBER,
+            "comment": "close cmd",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": _market_filling_mode(),
+        })
+        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(
+                "Closed %s position %s (%s lots, opened @ %.2f) @ %.2f  profit=%.2f",
+                "BUY" if is_buy else "SELL", pos.ticket, pos.volume, pos.price_open, result.price, pos.profit,
+            )
+            return True
+        if result is None or result.retcode not in _RETRY_RETCODES:
+            break
+    logger.error(
+        "Could not close position %s: %s",
+        pos.ticket, f"retcode={result.retcode} {result.comment}" if result else mt5.last_error(),
+    )
+    return False
+
+
+def close_all() -> tuple[list[int], list[int]]:
+    """
+    Closes every open position of ours on SYMBOL at market and cancels our pending orders,
+    so a pending entry 2 can't fill after the trade was closed. Manual trades (other magic
+    numbers) are left alone. Returns (closed position tickets, cancelled order tickets).
+    """
+    # Pending orders first, so none of them fills while the positions are being closed
+    cancelled = []
+    for order in mt5.orders_get(symbol=SYMBOL) or ():
+        if order.magic != MAGIC_NUMBER:
+            continue
+        result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket})
+        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info("Cancelled pending order %s @ %.2f", order.ticket, order.price_open)
+            cancelled.append(order.ticket)
+        else:
+            logger.error(
+                "Could not cancel pending order %s: %s",
+                order.ticket, result.comment if result else mt5.last_error(),
+            )
+
+    closed = [
+        pos.ticket for pos in (mt5.positions_get(symbol=SYMBOL) or ())
+        if pos.magic == MAGIC_NUMBER and _close_position(pos)
+    ]
+    if not closed and not cancelled:
+        logger.info("Close command: no open positions or pending orders of ours")
+    return closed, cancelled
+
+
 def _entry1_closed_at_tp(order, entry1_comment: str) -> bool:
     # Window is generous on both sides because history uses broker server time
     setup = datetime.fromtimestamp(order.time_setup, timezone.utc)
