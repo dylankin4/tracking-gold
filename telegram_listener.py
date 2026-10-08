@@ -78,7 +78,7 @@ async def monitor_orders():
                 if check_history:
                     next_history_check = loop.time() + config.MONITOR_INTERVAL_SECONDS
                 mt5_handler.cancel_entry2_after_entry1_tp(check_history=check_history)
-                mt5_handler.move_sl_to_breakeven()
+                mt5_handler.manage_profitable_positions()
             else:
                 delay = 30  # back off while MT5 is unavailable
         except Exception:

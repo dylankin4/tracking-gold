@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -17,6 +18,7 @@ from config import (
     MT5_PATH,
     MT5_SERVER,
     ORDER_EXPIRY_HOURS,
+    PARTIAL_CLOSE_FRACTION,
     SYMBOL,
     TP_DISTANCES,
 )
@@ -245,8 +247,10 @@ def place_orders(signal: TradeSignal) -> list[int]:
 _RETRY_RETCODES = {mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_PRICE_CHANGED, mt5.TRADE_RETCODE_PRICE_OFF}
 
 
-def _close_position(pos) -> bool:
+def _close_position(pos, volume: float | None = None, comment: str = "close cmd") -> bool:
+    """Closes `volume` lots of the position at market (all of it when volume is None)."""
     is_buy = pos.type == mt5.POSITION_TYPE_BUY
+    volume = pos.volume if volume is None else volume
     result = None
     for _ in range(3):
         tick = mt5.symbol_info_tick(SYMBOL)
@@ -256,27 +260,27 @@ def _close_position(pos) -> bool:
         result = mt5.order_send({
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": SYMBOL,
-            "volume": pos.volume,
+            "volume": volume,
             "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
             "position": pos.ticket,
             "price": tick.bid if is_buy else tick.ask,
             "deviation": MARKET_DEVIATION_POINTS,
             "magic": MAGIC_NUMBER,
-            "comment": "close cmd",
+            "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": _market_filling_mode(),
         })
         if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
             logger.info(
-                "Closed %s position %s (%s lots, opened @ %.2f) @ %.2f  profit=%.2f",
-                "BUY" if is_buy else "SELL", pos.ticket, pos.volume, pos.price_open, result.price, pos.profit,
+                "Closed %s of %s lots of %s position %s (opened @ %.2f) @ %.2f",
+                volume, pos.volume, "BUY" if is_buy else "SELL", pos.ticket, pos.price_open, result.price,
             )
             return True
         if result is None or result.retcode not in _RETRY_RETCODES:
             break
     logger.error(
-        "Could not close position %s: %s",
-        pos.ticket, f"retcode={result.retcode} {result.comment}" if result else mt5.last_error(),
+        "Could not close %s lots of position %s: %s",
+        volume, pos.ticket, f"retcode={result.retcode} {result.comment}" if result else mt5.last_error(),
     )
     return False
 
@@ -327,15 +331,50 @@ def breakeven_sl(is_buy: bool, open_price: float, current_sl: float, price: floa
     return target
 
 
-# Position ticket -> monotonic time of the last failed SL move, so a rejected move isn't retried every tick
+def partial_close_volume(volume: float, entry_volume: float, fraction: float,
+                         step: float, min_volume: float) -> float:
+    """
+    Lots to close for the partial take-profit, or 0 if there is nothing to close: the feature is
+    off, the position was already partially closed (volume < entry_volume), or it is too small to
+    split (e.g. 0.01 lot when the broker's minimum is 0.01).
+    """
+    if fraction <= 0 or volume < entry_volume - step / 2:
+        return 0.0
+    lots = math.floor(entry_volume * fraction / step + 1e-9) * step
+    if lots < min_volume - 1e-9 or volume - lots < min_volume - 1e-9:
+        return 0.0
+    return round(lots, 8)
+
+
+# Position ticket -> monotonic time of the last failed partial close / SL move, so it isn't retried every tick
 _breakeven_failures: dict[int, float] = {}
 _BREAKEVEN_RETRY_SECONDS = 30
+# Position ticket -> lots it was opened with (fixed for the position's life)
+_entry_volumes: dict[int, float] = {}
+# Positions already reported as too small to split, so the warning is logged once
+_unsplittable: set[int] = set()
 
 
-def move_sl_to_breakeven() -> list[int]:
+def _entry_volume(ticket: int) -> float | None:
+    """Lots the position was opened with, read from its deal history (survives bot restarts)."""
+    if ticket not in _entry_volumes:
+        deals = mt5.history_deals_get(position=ticket)
+        if not deals:
+            return None
+        volume = sum(d.volume for d in deals if d.entry == mt5.DEAL_ENTRY_IN)
+        if volume <= 0:
+            return None
+        _entry_volumes[ticket] = volume
+    return _entry_volumes[ticket]
+
+
+def manage_profitable_positions() -> list[int]:
     """
-    Moves the SL of every open position of ours to entry +/- BREAKEVEN_OFFSET once price
-    is BREAKEVEN_TRIGGER in profit. Returns the tickets whose SL was moved.
+    Once one of our positions is BREAKEVEN_TRIGGER in profit:
+      1. closes PARTIAL_CLOSE_FRACTION of it (once per position), then
+      2. moves its SL to entry +/- BREAKEVEN_OFFSET.
+    Both steps check the position's current state, so they are safe to repeat every tick and
+    after a restart. Returns the tickets that were changed.
     """
     if BREAKEVEN_TRIGGER <= 0:
         return []
@@ -347,15 +386,43 @@ def move_sl_to_breakeven() -> list[int]:
     if tick is None or info is None:
         return []
 
-    moved = []
+    changed = []
     now = time.monotonic()
     for pos in positions:
         is_buy = pos.type == mt5.POSITION_TYPE_BUY
         price = tick.bid if is_buy else tick.ask
-        target = breakeven_sl(is_buy, pos.price_open, pos.sl, price, BREAKEVEN_TRIGGER, BREAKEVEN_OFFSET)
-        if target is None:
+        profit = price - pos.price_open if is_buy else pos.price_open - price
+        if profit < BREAKEVEN_TRIGGER:
             continue
         if now - _breakeven_failures.get(pos.ticket, -_BREAKEVEN_RETRY_SECONDS) < _BREAKEVEN_RETRY_SECONDS:
+            continue
+
+        # 1. Take part of the profit
+        entry_volume = _entry_volume(pos.ticket)
+        if entry_volume is not None:
+            lots = partial_close_volume(
+                pos.volume, entry_volume, PARTIAL_CLOSE_FRACTION, info.volume_step, info.volume_min,
+            )
+            if lots > 0:
+                logger.info(
+                    "Partial close: %s position %s opened @ %.2f is %.2f in profit — closing %s of %s lots",
+                    "BUY" if is_buy else "SELL", pos.ticket, pos.price_open, profit, lots, pos.volume,
+                )
+                if not _close_position(pos, lots, comment="partial tp"):
+                    _breakeven_failures[pos.ticket] = now
+                    continue
+                changed.append(pos.ticket)
+            elif (PARTIAL_CLOSE_FRACTION > 0 and pos.volume >= entry_volume - info.volume_step / 2
+                    and pos.ticket not in _unsplittable):
+                _unsplittable.add(pos.ticket)
+                logger.warning(
+                    "Position %s (%s lots) is too small to close %.0f%% of it (min lot %s) — only moving SL",
+                    pos.ticket, pos.volume, PARTIAL_CLOSE_FRACTION * 100, info.volume_min,
+                )
+
+        # 2. Protect the rest
+        target = breakeven_sl(is_buy, pos.price_open, pos.sl, price, BREAKEVEN_TRIGGER, BREAKEVEN_OFFSET)
+        if target is None:
             continue
         target = round(target, info.digits)
 
@@ -369,11 +436,11 @@ def move_sl_to_breakeven() -> list[int]:
         if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
             logger.info(
                 "Breakeven: %s position %s opened @ %.2f is %.2f in profit — SL %.2f -> %.2f",
-                "BUY" if is_buy else "SELL", pos.ticket, pos.price_open,
-                abs(price - pos.price_open), pos.sl, target,
+                "BUY" if is_buy else "SELL", pos.ticket, pos.price_open, profit, pos.sl, target,
             )
             _breakeven_failures.pop(pos.ticket, None)
-            moved.append(pos.ticket)
+            if pos.ticket not in changed:
+                changed.append(pos.ticket)
         else:
             _breakeven_failures[pos.ticket] = now
             logger.error(
@@ -381,7 +448,7 @@ def move_sl_to_breakeven() -> list[int]:
                 pos.ticket, target, _BREAKEVEN_RETRY_SECONDS,
                 f"retcode={result.retcode} {result.comment}" if result else mt5.last_error(),
             )
-    return moved
+    return changed
 
 
 def _entry1_closed_at_tp(order, entry1_comment: str) -> bool:
