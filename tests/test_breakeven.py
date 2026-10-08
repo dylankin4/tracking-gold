@@ -1,6 +1,6 @@
 import pytest
 
-from mt5_handler import breakeven_sl
+from mt5_handler import breakeven_sl, partial_close_volume
 
 TRIGGER, OFFSET = 5, 0.5
 
@@ -24,6 +24,20 @@ TRIGGER, OFFSET = 5, 0.5
 ])
 def test_breakeven_sl(is_buy, open_price, sl, price, expected):
     assert breakeven_sl(is_buy, open_price, sl, price, TRIGGER, OFFSET) == expected
+
+
+@pytest.mark.parametrize("volume,entry_volume,fraction,expected", [
+    (0.1, 0.1, 0.5, 0.05),     # half of 0.1
+    (0.2, 0.2, 0.5, 0.1),
+    (0.15, 0.15, 0.5, 0.07),   # rounded down to the lot step
+    (0.05, 0.1, 0.5, 0.0),     # already partially closed
+    (0.06, 0.1, 0.5, 0.0),     # partly closed by hand: don't close again
+    (0.01, 0.01, 0.5, 0.0),    # too small to split
+    (0.02, 0.02, 0.5, 0.01),   # smallest splittable size
+    (0.1, 0.1, 0.0, 0.0),      # feature off
+])
+def test_partial_close_volume(volume, entry_volume, fraction, expected):
+    assert partial_close_volume(volume, entry_volume, fraction, step=0.01, min_volume=0.01) == pytest.approx(expected)
 
 
 def test_trigger_zero_disables_breakeven():
