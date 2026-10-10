@@ -9,6 +9,7 @@ import mt5_terminal
 from config import (
     BREAKEVEN_OFFSET,
     BREAKEVEN_TRIGGER,
+    DAILY_MAX_LOSS,
     DAILY_PROFIT_TARGET,
     LOT_SIZE,
     MAGIC_NUMBER,
@@ -218,6 +219,15 @@ def daily_closed_profit(server_now: int) -> float | None:
     return sum_trade_profit(deals)
 
 
+def daily_limit_reason(profit: float, target: float, max_loss: float) -> str | None:
+    """Why no new trades may be opened today, or None. A limit of 0 is off."""
+    if target > 0 and profit > target:
+        return f"Today's closed profit {profit:.2f} is above the daily target {target:.2f}"
+    if max_loss > 0 and profit <= -max_loss:
+        return f"Today's closed loss {-profit:.2f} has reached the daily max loss {max_loss:.2f}"
+    return None
+
+
 def place_orders(signal: TradeSignal) -> list[int]:
     """
     Places one limit order per entry price that is still valid. If price has already
@@ -233,18 +243,19 @@ def place_orders(signal: TradeSignal) -> list[int]:
         logger.error("No tick data for %s: %s", SYMBOL, mt5.last_error())
         return []
 
-    if DAILY_PROFIT_TARGET > 0:
+    if DAILY_PROFIT_TARGET > 0 or DAILY_MAX_LOSS > 0:
         profit = daily_closed_profit(tick.time)
         if profit is None:
             logger.error("Could not read today's trade history — skipping signal to be safe")
             return []
-        if profit > DAILY_PROFIT_TARGET:
-            logger.warning(
-                "Today's closed profit %.2f is above the daily target %.2f — not opening new trades",
-                profit, DAILY_PROFIT_TARGET,
-            )
+        reason = daily_limit_reason(profit, DAILY_PROFIT_TARGET, DAILY_MAX_LOSS)
+        if reason:
+            logger.warning("%s — not opening new trades", reason)
             return []
-        logger.info("Today's closed profit %.2f (daily target %.2f)", profit, DAILY_PROFIT_TARGET)
+        logger.info(
+            "Today's closed profit %.2f (daily target %.2f, max loss %.2f)",
+            profit, DAILY_PROFIT_TARGET, DAILY_MAX_LOSS,
+        )
 
     is_buy = signal.direction == "BUY"
     market_price = tick.ask if is_buy else tick.bid
