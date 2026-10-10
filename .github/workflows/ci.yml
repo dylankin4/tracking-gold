@@ -1,20 +1,31 @@
 name: CI
 
+# Runs only when a PR is merged into main, when a v* release tag is pushed, or by hand
+# (Actions tab -> CI -> Run workflow). Opening or updating a PR does not trigger it.
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
   pull_request:
+    types: [closed]
+    branches: [main]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write  # needed to publish releases on tags
 
+env:
+  # The merged commit on main for merged PRs; the pushed tag / chosen branch otherwise
+  COMMIT: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+
 jobs:
   test-and-build:
+    # A PR closed without merging also fires "closed": skip it
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.COMMIT }}
 
       - uses: actions/setup-python@v5
         with:
@@ -33,7 +44,7 @@ jobs:
         shell: pwsh
         run: |
           if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") }
-          else { $v = "0.0.0-dev.${{ github.run_number }}+$("${{ github.sha }}".Substring(0, 7))" }
+          else { $v = "0.0.0-dev.${{ github.run_number }}+$($env:COMMIT.Substring(0, 7))" }
           "version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Build exe
