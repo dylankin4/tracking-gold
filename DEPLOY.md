@@ -2,9 +2,15 @@
 
 ## CI (GitHub Actions)
 
-`.github/workflows/ci.yml` runs on every push to `main`, every pull request and every `v*` tag. Each run:
+`.github/workflows/ci.yml` runs only:
 
-1. Runs the parser tests (`pytest`).
+- when a pull request is **merged** into `main` (opening or updating a PR does not run it; a PR closed without merging is skipped),
+- when a `v*` tag is pushed,
+- by hand: Actions tab → CI → **Run workflow**. Use this to test a branch before merging.
+
+Each run:
+
+1. Runs the tests (`pytest`).
 2. Builds `TrackingGold.exe` (`build.ps1 -Version <v> -Package`).
 3. Uploads `TrackingGold-<version>.zip` as a workflow artifact (kept 14 days).
 4. On a `v*` tag only: publishes the zip as a GitHub Release.
