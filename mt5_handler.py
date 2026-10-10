@@ -9,6 +9,7 @@ import mt5_terminal
 from config import (
     BREAKEVEN_OFFSET,
     BREAKEVEN_TRIGGER,
+    DAILY_PROFIT_TARGET,
     LOT_SIZE,
     MAGIC_NUMBER,
     MARKET_DEVIATION_POINTS,
@@ -189,6 +190,34 @@ def _comment(group: str, entry_index: int) -> str:
     return f"sig{group}_e{entry_index + 1}"
 
 
+def server_day_start(server_time: int) -> int:
+    """
+    Midnight of the broker's trading day. MT5 timestamps (tick.time, deal.time) are the
+    broker's server clock written as if it were UTC, so the day starts at a multiple of 86400.
+    """
+    return server_time - server_time % 86400
+
+
+def sum_trade_profit(deals) -> float:
+    """Net result of trading deals (profit + commission + swap + fee); deposits/withdrawals are ignored."""
+    return sum(
+        d.profit + d.commission + d.swap + getattr(d, "fee", 0.0)
+        for d in deals
+        if d.type in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL)
+    )
+
+
+def daily_closed_profit(server_now: int) -> float | None:
+    """Closed profit of the whole account since the start of the broker's day, or None on error."""
+    start = datetime.fromtimestamp(server_day_start(server_now), timezone.utc)
+    # End is generous: history is filtered on server time, which may be ahead of real UTC
+    deals = mt5.history_deals_get(start, datetime.now(timezone.utc) + timedelta(days=2))
+    if deals is None:
+        logger.error("history_deals_get failed: %s", mt5.last_error())
+        return None
+    return sum_trade_profit(deals)
+
+
 def place_orders(signal: TradeSignal) -> list[int]:
     """
     Places one limit order per entry price that is still valid. If price has already
@@ -203,6 +232,19 @@ def place_orders(signal: TradeSignal) -> list[int]:
     if tick is None:
         logger.error("No tick data for %s: %s", SYMBOL, mt5.last_error())
         return []
+
+    if DAILY_PROFIT_TARGET > 0:
+        profit = daily_closed_profit(tick.time)
+        if profit is None:
+            logger.error("Could not read today's trade history — skipping signal to be safe")
+            return []
+        if profit > DAILY_PROFIT_TARGET:
+            logger.warning(
+                "Today's closed profit %.2f is above the daily target %.2f — not opening new trades",
+                profit, DAILY_PROFIT_TARGET,
+            )
+            return []
+        logger.info("Today's closed profit %.2f (daily target %.2f)", profit, DAILY_PROFIT_TARGET)
 
     is_buy = signal.direction == "BUY"
     market_price = tick.ask if is_buy else tick.bid
