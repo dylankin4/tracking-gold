@@ -55,6 +55,8 @@ MONITOR_INTERVAL_SECONDS = float(os.getenv("SIGNAL_MONITOR_INTERVAL", "2"))
 # No new trades once today's closed profit (whole account, broker day) is above this, in account
 # currency. Open trades and pending orders are still managed. 0 turns the limit off.
 DAILY_PROFIT_TARGET = float(os.getenv("SIGNAL_DAILY_PROFIT_TARGET", "150"))
+# Same, once today's closed loss reaches this much (500 -> stop at a closed result of -500). 0 = off.
+DAILY_MAX_LOSS = float(os.getenv("SIGNAL_DAILY_MAX_LOSS", "500"))
 
 # Signals older than this (e.g. delivered late after a reconnect) are ignored
 MAX_SIGNAL_AGE_SECONDS = float(os.getenv("SIGNAL_MAX_AGE_SECONDS", "120"))
