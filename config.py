@@ -52,6 +52,10 @@ PARTIAL_CLOSE_FRACTION = float(os.getenv("SIGNAL_PARTIAL_CLOSE_FRACTION", "0.5")
 MONITOR_TICK_SECONDS = float(os.getenv("SIGNAL_MONITOR_TICK", "0.25"))
 # How often to also check trade history for an entry 1 already closed at TP
 MONITOR_INTERVAL_SECONDS = float(os.getenv("SIGNAL_MONITOR_INTERVAL", "2"))
+# No new trades once today's closed profit (whole account, broker day) is above this, in account
+# currency. Open trades and pending orders are still managed. 0 turns the limit off.
+DAILY_PROFIT_TARGET = float(os.getenv("SIGNAL_DAILY_PROFIT_TARGET", "150"))
+
 # Signals older than this (e.g. delivered late after a reconnect) are ignored
 MAX_SIGNAL_AGE_SECONDS = float(os.getenv("SIGNAL_MAX_AGE_SECONDS", "120"))
 
