@@ -32,22 +32,51 @@ SYMBOL = os.getenv("SIGNAL_SYMBOL", "XAUUSD")
 LOT_SIZE = float(os.getenv("SIGNAL_LOT_SIZE", "0.01"))
 MAGIC_NUMBER = int(os.getenv("SIGNAL_MAGIC", "20260611"))
 ORDER_EXPIRY_HOURS = int(os.getenv("SIGNAL_EXPIRY_HOURS", "24"))
-# TP distance from entry, per entry: entry 1 -> 7, entry 2 -> 9 (e.g. BUY 4150 as entry 2 gets TP 4159)
-TP_DISTANCES = [
-    float(os.getenv("SIGNAL_TP_DISTANCE", "7")),
-    float(os.getenv("SIGNAL_TP_DISTANCE_2", "9")),
-]
+
+
+def parse_tp_ladder(spec: str) -> list[tuple[float, float | None]]:
+    """
+    Parses "5:0.3,10:6,15:12,20" into [(5, 0.3), (10, 6), (15, 12), (20, None)].
+    Each "profit:sl" step closes part of the position once it is `profit` in our favour and
+    moves the SL to entry +/- `sl`; the last step has no SL and closes everything.
+    """
+    steps = []
+    for part in spec.replace(" ", "").split(","):
+        profit, _, sl = part.partition(":")
+        steps.append((float(profit), float(sl) if sl else None))
+    if not steps:
+        raise ValueError("needs at least one step")
+    if steps[-1][1] is not None:
+        raise ValueError("the last step closes everything, so it must have no SL (e.g. '20')")
+    for (prev, _), (cur, _) in zip(steps, steps[1:]):
+        if cur <= prev:
+            raise ValueError("profit levels must increase")
+    for profit, sl in steps[:-1]:
+        if sl is None or not 0 <= sl < profit:
+            raise ValueError(f"step {profit} needs an SL between 0 and {profit}")
+    return steps
+
+
+# Take-profit ladder, applied to every position (entry 1, entry 2 and market entries).
+# At each step, TP_LADDER_CLOSE_FRACTION of the lots still open is closed and the SL moves to
+# entry +/- the step's SL. The last step closes the rest; it is also sent to the broker as the
+# order's TP, so it fires even while the bot is offline.
+#   0.16 lot: +5 close 0.08, SL +0.3 | +10 close 0.04, SL +6 | +15 close 0.02, SL +12 | +20 close 0.02
+TP_LADDER_SPEC = os.getenv("SIGNAL_TP_LADDER", "5:0.3,10:6,15:12,20")
+TP_LADDER_CLOSE_FRACTION = float(os.getenv("SIGNAL_TP_LADDER_CLOSE_FRACTION", "0.5"))
+try:
+    TP_LADDER = parse_tp_ladder(TP_LADDER_SPEC)
+    TP_LADDER_ERROR = ""
+except ValueError as e:
+    TP_LADDER, TP_LADDER_ERROR = [(20.0, None)], f"SIGNAL_TP_LADDER '{TP_LADDER_SPEC}' is invalid: {e}"
+# Distance of the final TP from the entry
+FINAL_TP_DISTANCE = TP_LADDER[-1][0]
+
 # If price already passed an entry, a market order is opened only when price is at least
 # this far from the SL; otherwise the passed entries are skipped
 MIN_SL_DISTANCE = float(os.getenv("SIGNAL_MIN_SL_DISTANCE", "5"))
 # Max slippage allowed for market orders, in points
 MARKET_DEVIATION_POINTS = int(os.getenv("SIGNAL_DEVIATION_POINTS", "20"))
-# Once a position is this far in profit, PARTIAL_CLOSE_FRACTION of it is closed and the SL of the
-# rest is moved to entry +/- BREAKEVEN_OFFSET (BUY 4150 at 4155 -> close half, SL 4150.5).
-# SIGNAL_BREAKEVEN_TRIGGER=0 turns both off; SIGNAL_PARTIAL_CLOSE_FRACTION=0 keeps only the SL move.
-BREAKEVEN_TRIGGER = float(os.getenv("SIGNAL_BREAKEVEN_TRIGGER", "5"))
-BREAKEVEN_OFFSET = float(os.getenv("SIGNAL_BREAKEVEN_OFFSET", "0.5"))
-PARTIAL_CLOSE_FRACTION = float(os.getenv("SIGNAL_PARTIAL_CLOSE_FRACTION", "0.5"))
 # How often to compare the live price with entry 1's TP (to cancel the pending entry 2)
 MONITOR_TICK_SECONDS = float(os.getenv("SIGNAL_MONITOR_TICK", "0.25"))
 # How often to also check trade history for an entry 1 already closed at TP
@@ -75,6 +104,10 @@ def validate():
         problems.append("MT5_LOGIN, MT5_PASSWORD and MT5_SERVER must be set")
     if LOT_SIZE <= 0:
         problems.append("SIGNAL_LOT_SIZE must be > 0")
+    if TP_LADDER_ERROR:
+        problems.append(TP_LADDER_ERROR)
+    if not 0 < TP_LADDER_CLOSE_FRACTION < 1:
+        problems.append("SIGNAL_TP_LADDER_CLOSE_FRACTION must be between 0 and 1")
     if MT5_PATH and not os.path.isfile(MT5_PATH):
         problems.append(f"MT5_PATH does not exist: {MT5_PATH}")
     return problems
