@@ -63,8 +63,8 @@ async def on_new_message(event):
 
 async def monitor_orders():
     """
-    Cancels a pending entry 2 as soon as entry 1 of the same signal reaches TP, and moves the SL
-    of profitable positions to breakeven.
+    Cancels a pending entry 2 as soon as entry 1 of the same signal reaches TP, and runs the
+    take-profit ladder (partial closes + SL moves) on open positions.
     The live price is checked every tick interval; the slower trade-history check
     (catches TPs hit while the bot was busy or offline) runs every MONITOR_INTERVAL_SECONDS.
     """

@@ -7,10 +7,9 @@ import MetaTrader5 as mt5
 
 import mt5_terminal
 from config import (
-    BREAKEVEN_OFFSET,
-    BREAKEVEN_TRIGGER,
     DAILY_MAX_LOSS,
     DAILY_PROFIT_TARGET,
+    FINAL_TP_DISTANCE,
     LOT_SIZE,
     MAGIC_NUMBER,
     MARKET_DEVIATION_POINTS,
@@ -20,9 +19,9 @@ from config import (
     MT5_PATH,
     MT5_SERVER,
     ORDER_EXPIRY_HOURS,
-    PARTIAL_CLOSE_FRACTION,
     SYMBOL,
-    TP_DISTANCES,
+    TP_LADDER,
+    TP_LADDER_CLOSE_FRACTION,
 )
 from message_parser import TradeSignal
 
@@ -77,11 +76,6 @@ def ensure_connected() -> bool:
 
 def disconnect():
     mt5.shutdown()
-
-
-def _tp_distance(entry_index: int) -> float:
-    # Entry 1 -> TP_DISTANCES[0], entry 2 -> TP_DISTANCES[1], ...; extra entries reuse the last one
-    return TP_DISTANCES[min(entry_index, len(TP_DISTANCES) - 1)]
 
 
 def _tp_for(price: float, direction: str, distance: float) -> float:
@@ -271,7 +265,7 @@ def place_orders(signal: TradeSignal) -> list[int]:
 
     tickets = []
     for i, price in limit_entries:
-        ticket = _place_limit(signal, price, _tp_distance(i), expiry, _comment(group, i))
+        ticket = _place_limit(signal, price, FINAL_TP_DISTANCE, expiry, _comment(group, i))
         if ticket:
             tickets.append(ticket)
 
@@ -282,9 +276,9 @@ def place_orders(signal: TradeSignal) -> list[int]:
                 "Price %.2f already past entries %s — entering at market (%.2f from SL)",
                 market_price, passed_prices, sl_distance,
             )
-            # The market order takes the place of the first passed entry, so it uses that entry's TP distance
+            # The market order takes the place of the first passed entry
             first = passed_entries[0][0]
-            ticket = _place_market(signal, market_price, _tp_distance(first), _comment(group, first))
+            ticket = _place_market(signal, market_price, FINAL_TP_DISTANCE, _comment(group, first))
             if ticket:
                 tickets.append(ticket)
         else:
@@ -368,44 +362,61 @@ def close_all() -> tuple[list[int], list[int]]:
     return closed, cancelled
 
 
-def breakeven_sl(is_buy: bool, open_price: float, current_sl: float, price: float,
-                 trigger: float, offset: float) -> float | None:
+def ladder_volumes(entry_volume: float, steps: int, fraction: float, step: float, min_volume: float) -> list[float]:
     """
-    The SL a position should be moved to, or None if it should stay as it is.
-    `price` is the price the position would close at (bid for a BUY, ask for a SELL).
+    Lots left open after each ladder step. Every step but the last closes `fraction` of what is
+    left (rounded down to the lot step); the last closes everything.
+    0.16 lot, 4 steps, 50% -> [0.08, 0.04, 0.02, 0]. A step is skipped (nothing closed) when
+    the part to close or the part left would be below the broker's minimum lot.
+    """
+    left = entry_volume
+    volumes = []
+    for _ in range(steps - 1):
+        lots = math.floor(left * fraction / step + 1e-9) * step
+        if lots < min_volume - 1e-9 or left - lots < min_volume - 1e-9:
+            lots = 0.0
+        left = round(left - lots, 8)
+        volumes.append(left)
+    volumes.append(0.0)
+    return volumes
+
+
+def ladder_action(is_buy: bool, open_price: float, price: float, volume: float, sl: float,
+                  entry_volume: float, ladder: list[tuple[float, float | None]], fraction: float,
+                  step: float, min_volume: float) -> tuple[int, float, float | None] | None:
+    """
+    What to do with a position now: (ladder step index, lots to close, new SL or None),
+    or None when nothing is due. Uses the highest step price has reached, so a jump from +4 to
+    +11 does steps 1 and 2 in one go. `price` is the closing price (bid for BUY, ask for SELL).
+    Stateless: lots already closed are read from `volume`, so it is safe to repeat every tick.
     """
     profit = price - open_price if is_buy else open_price - price
-    if trigger <= 0 or profit < trigger:
+    reached = [i for i, (level, _) in enumerate(ladder) if profit >= level]
+    if not reached:
         return None
-    target = open_price + offset if is_buy else open_price - offset
-    # Only ever tighten the SL; a missing SL (0) always counts as looser
-    if current_sl > 0 and (current_sl >= target if is_buy else current_sl <= target):
+    i = reached[-1]
+
+    target_volume = ladder_volumes(entry_volume, len(ladder), fraction, step, min_volume)[i]
+    lots = round(volume - target_volume, 8) if volume > target_volume + step / 2 else 0.0
+
+    new_sl = None
+    offset = ladder[i][1]
+    if offset is not None:
+        target_sl = open_price + offset if is_buy else open_price - offset
+        # Only ever tighten the SL; a missing SL (0) always counts as looser
+        if sl <= 0 or (sl < target_sl if is_buy else sl > target_sl):
+            new_sl = target_sl
+
+    if lots <= 0 and new_sl is None:
         return None
-    return target
+    return i, lots, new_sl
 
 
-def partial_close_volume(volume: float, entry_volume: float, fraction: float,
-                         step: float, min_volume: float) -> float:
-    """
-    Lots to close for the partial take-profit, or 0 if there is nothing to close: the feature is
-    off, the position was already partially closed (volume < entry_volume), or it is too small to
-    split (e.g. 0.01 lot when the broker's minimum is 0.01).
-    """
-    if fraction <= 0 or volume < entry_volume - step / 2:
-        return 0.0
-    lots = math.floor(entry_volume * fraction / step + 1e-9) * step
-    if lots < min_volume - 1e-9 or volume - lots < min_volume - 1e-9:
-        return 0.0
-    return round(lots, 8)
-
-
-# Position ticket -> monotonic time of the last failed partial close / SL move, so it isn't retried every tick
-_breakeven_failures: dict[int, float] = {}
-_BREAKEVEN_RETRY_SECONDS = 30
+# Position ticket -> monotonic time of the last failed close / SL move, so it isn't retried every tick
+_ladder_failures: dict[int, float] = {}
+_LADDER_RETRY_SECONDS = 30
 # Position ticket -> lots it was opened with (fixed for the position's life)
 _entry_volumes: dict[int, float] = {}
-# Positions already reported as too small to split, so the warning is logged once
-_unsplittable: set[int] = set()
 
 
 def _entry_volume(ticket: int) -> float | None:
@@ -421,16 +432,32 @@ def _entry_volume(ticket: int) -> float | None:
     return _entry_volumes[ticket]
 
 
+def _move_sl(pos, new_sl: float, digits: int) -> bool:
+    new_sl = round(new_sl, digits)
+    result = mt5.order_send({
+        "action": mt5.TRADE_ACTION_SLTP,
+        "symbol": SYMBOL,
+        "position": pos.ticket,
+        "sl": new_sl,
+        "tp": pos.tp,
+    })
+    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+        logger.info("Position %s: SL %.2f -> %.2f", pos.ticket, pos.sl, new_sl)
+        return True
+    logger.error(
+        "Could not move SL of position %s to %.2f (retrying in %ss): %s",
+        pos.ticket, new_sl, _LADDER_RETRY_SECONDS,
+        f"retcode={result.retcode} {result.comment}" if result else mt5.last_error(),
+    )
+    return False
+
+
 def manage_profitable_positions() -> list[int]:
     """
-    Once one of our positions is BREAKEVEN_TRIGGER in profit:
-      1. closes PARTIAL_CLOSE_FRACTION of it (once per position), then
-      2. moves its SL to entry +/- BREAKEVEN_OFFSET.
-    Both steps check the position's current state, so they are safe to repeat every tick and
-    after a restart. Returns the tickets that were changed.
+    Runs the take-profit ladder (TP_LADDER) on every open position of ours: at each profit
+    level, closes part of the position and moves the SL up; the last level closes the rest.
+    Returns the tickets that were changed.
     """
-    if BREAKEVEN_TRIGGER <= 0:
-        return []
     positions = [p for p in (mt5.positions_get(symbol=SYMBOL) or ()) if p.magic == MAGIC_NUMBER]
     if not positions:
         return []
@@ -442,65 +469,44 @@ def manage_profitable_positions() -> list[int]:
     changed = []
     now = time.monotonic()
     for pos in positions:
+        if now - _ladder_failures.get(pos.ticket, -_LADDER_RETRY_SECONDS) < _LADDER_RETRY_SECONDS:
+            continue
+        entry_volume = _entry_volume(pos.ticket)
+        if entry_volume is None:
+            continue
         is_buy = pos.type == mt5.POSITION_TYPE_BUY
         price = tick.bid if is_buy else tick.ask
-        profit = price - pos.price_open if is_buy else pos.price_open - price
-        if profit < BREAKEVEN_TRIGGER:
+        action = ladder_action(
+            is_buy, pos.price_open, price, pos.volume, pos.sl, entry_volume,
+            TP_LADDER, TP_LADDER_CLOSE_FRACTION, info.volume_step, info.volume_min,
+        )
+        if action is None:
             continue
-        if now - _breakeven_failures.get(pos.ticket, -_BREAKEVEN_RETRY_SECONDS) < _BREAKEVEN_RETRY_SECONDS:
-            continue
+        step, lots, new_sl = action
+        level = TP_LADDER[step][0]
 
-        # 1. Take part of the profit
-        entry_volume = _entry_volume(pos.ticket)
-        if entry_volume is not None:
-            lots = partial_close_volume(
-                pos.volume, entry_volume, PARTIAL_CLOSE_FRACTION, info.volume_step, info.volume_min,
-            )
-            if lots > 0:
-                logger.info(
-                    "Partial close: %s position %s opened @ %.2f is %.2f in profit — closing %s of %s lots",
-                    "BUY" if is_buy else "SELL", pos.ticket, pos.price_open, profit, lots, pos.volume,
-                )
-                if not _close_position(pos, lots, comment="partial tp"):
-                    _breakeven_failures[pos.ticket] = now
-                    continue
-                changed.append(pos.ticket)
-            elif (PARTIAL_CLOSE_FRACTION > 0 and pos.volume >= entry_volume - info.volume_step / 2
-                    and pos.ticket not in _unsplittable):
-                _unsplittable.add(pos.ticket)
-                logger.warning(
-                    "Position %s (%s lots) is too small to close %.0f%% of it (min lot %s) — only moving SL",
-                    pos.ticket, pos.volume, PARTIAL_CLOSE_FRACTION * 100, info.volume_min,
-                )
-
-        # 2. Protect the rest
-        target = breakeven_sl(is_buy, pos.price_open, pos.sl, price, BREAKEVEN_TRIGGER, BREAKEVEN_OFFSET)
-        if target is None:
-            continue
-        target = round(target, info.digits)
-
-        result = mt5.order_send({
-            "action": mt5.TRADE_ACTION_SLTP,
-            "symbol": SYMBOL,
-            "position": pos.ticket,
-            "sl": target,
-            "tp": pos.tp,
-        })
-        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info(
-                "Breakeven: %s position %s opened @ %.2f is %.2f in profit — SL %.2f -> %.2f",
-                "BUY" if is_buy else "SELL", pos.ticket, pos.price_open, profit, pos.sl, target,
-            )
-            _breakeven_failures.pop(pos.ticket, None)
+        logger.info(
+            "TP ladder step %d/%d (+%g): %s position %s opened @ %.2f is %.2f in profit — close %s of %s lots%s",
+            step + 1, len(TP_LADDER), level, "BUY" if is_buy else "SELL", pos.ticket, pos.price_open,
+            abs(price - pos.price_open), lots, pos.volume,
+            f", SL -> entry {'+' if is_buy else '-'}{TP_LADDER[step][1]:g}" if new_sl is not None else "",
+        )
+        if lots > 0:
+            closing_all = lots >= pos.volume - info.volume_step / 2
+            if not _close_position(pos, None if closing_all else lots, comment=f"tp ladder {step + 1}"):
+                _ladder_failures[pos.ticket] = now
+                continue
+            changed.append(pos.ticket)
+            if closing_all:
+                _entry_volumes.pop(pos.ticket, None)
+                continue
+        if new_sl is not None:
+            if not _move_sl(pos, new_sl, info.digits):
+                _ladder_failures[pos.ticket] = now
+                continue
             if pos.ticket not in changed:
                 changed.append(pos.ticket)
-        else:
-            _breakeven_failures[pos.ticket] = now
-            logger.error(
-                "Could not move SL of position %s to %.2f (retrying in %ss): %s",
-                pos.ticket, target, _BREAKEVEN_RETRY_SECONDS,
-                f"retcode={result.retcode} {result.comment}" if result else mt5.last_error(),
-            )
+        _ladder_failures.pop(pos.ticket, None)
     return changed
 
 
