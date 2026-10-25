@@ -2,9 +2,11 @@
 # and restarts it if it exits. Runs in your user session (MT5 needs a desktop to toggle Algo Trading).
 # Usage:  powershell -ExecutionPolicy Bypass -File install_autostart.ps1
 #         powershell -ExecutionPolicy Bypass -File install_autostart.ps1 -Remove
+# The task is named after the bot's folder (C:\TrackingGold -> "TrackingGold", C:\TrackingGold2 ->
+# "TrackingGold2"), so several bots in different folders each get their own task.
 param([switch]$Remove)
 $ErrorActionPreference = "Stop"
-$name = "TrackingGold"
+$name = Split-Path $PSScriptRoot -Leaf
 
 if ($Remove) {
     Unregister-ScheduledTask -TaskName $name -Confirm:$false

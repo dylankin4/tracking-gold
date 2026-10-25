@@ -44,6 +44,30 @@ Then save it on the VPS:
 [Environment]::SetEnvironmentVariable("GITHUB_TOKEN", "<token>", "User")
 ```
 
+## Running several bots on one VPS
+
+Each bot is a separate folder (`C:\TrackingGold`, `C:\TrackingGold2`, …) with its own `TrackingGold.exe`, `.env`, Telegram session and `logs\`.
+The scheduled tasks are named after the folder: `TrackingGold`, `TrackingGold2`, `TrackingGold2-Update`.
+`update.ps1` in one folder only stops and restarts the bot of that folder.
+
+For each extra bot:
+
+1. **Install a second MT5 terminal in its own folder.** In the MT5 installer, open *Settings* and pick another installation folder, e.g. `C:\Program Files\MetaTrader 5 - Bot2`.
+   Log it in to the second account and turn on Algo Trading.
+2. Copy the release files (`TrackingGold.exe`, `.env.example`, the `.ps1` scripts) into the new folder.
+   **Don't copy `tracking_session.session`**: two bots must not share one Telegram session.
+3. Create the new folder's `.env`:
+   - `MT5_LOGIN` / `MT5_PASSWORD` / `MT5_SERVER` for the second account.
+   - `SIGNAL_CHANNEL` for the second channel.
+   - **`MT5_PATH` set to the second terminal's `terminal64.exe`.** The first bot's `.env` also needs `MT5_PATH` pointing at its own terminal.
+     Without it, both bots attach to the same terminal and keep logging it in to each other's account.
+4. Run `TrackingGold.exe` from the new folder by hand once.
+   It asks for the Telegram phone number and code, then creates its own session.
+   The same Telegram account works: each bot is just another logged-in device.
+5. In the new folder, run `install_autostart.ps1`, then `update.ps1 -InstallSchedule`.
+
+Two bots can only run side by side if they trade different MT5 accounts or use different `SIGNAL_MAGIC` values.
+
 ## Never commit
 
 `.env`, `*.session` and `logs/` are in `.gitignore`. They hold the MT5 password and the full Telegram login.

@@ -24,7 +24,8 @@ logger = logging.getLogger("main")
 from telegram_listener import run
 
 # A second copy of the bot would place every signal's orders twice
-_MUTEX_NAME = f"Global\\TrackingGoldBot_{config.MAGIC_NUMBER}"
+# (per MT5 account + magic, so bots trading different accounts can run side by side)
+_MUTEX_NAME = f"Global\\TrackingGoldBot_{config.MT5_LOGIN}_{config.MAGIC_NUMBER}"
 ERROR_ALREADY_EXISTS = 183
 
 # Restart backoff after a crash: doubles up to the max, resets once a run has lasted a while
@@ -51,7 +52,10 @@ def main():
 
     mutex = _acquire_single_instance()
     if mutex is None:
-        logger.error("Another instance of the bot is already running (magic %s) — exiting", config.MAGIC_NUMBER)
+        logger.error(
+            "Another bot is already running for MT5 account %s with magic %s — exiting",
+            config.MT5_LOGIN, config.MAGIC_NUMBER,
+        )
         sys.exit(3)
 
     logger.info(

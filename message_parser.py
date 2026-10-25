@@ -24,8 +24,15 @@ _HEADER_RE = re.compile(
     rf"\b(BUY|SELL)\b(?:(?!SL|TP)[^\d\n])*?{_NUM}(?:\s*[-–]\s*{_NUM})?",
     re.IGNORECASE,
 )
-# SL must start a line, so recaps like "GOLD SELL SL -140PIP" are not read as a stop loss
-_SL_RE = re.compile(rf"^\s*SL\s*[:\-]?\s*{_NUM}", re.IGNORECASE | re.MULTILINE)
+# Second channel format, entry on its own line and the direction anywhere before it:
+#   "🔴 SELL SIGNAL — XAUUSD.c (M1)" / "✈️ Entry: 4011.13" / "☠️ SL: 4015.95"
+_ENTRY_LINE_RE = re.compile(
+    rf"^[^\w\n]*ENTRY\s*[:@\-]?\s*{_NUM}(?:\s*[-–]\s*{_NUM})?", re.IGNORECASE | re.MULTILINE,
+)
+_DIRECTION_RE = re.compile(r"\b(BUY|SELL)\b", re.IGNORECASE)
+# SL must start a line (emoji/symbols before it are fine), so recaps like
+# "GOLD SELL SL -140PIP" are not read as a stop loss
+_SL_RE = re.compile(rf"^[^\w\n]*SL\s*[:\-]?\s*{_NUM}", re.IGNORECASE | re.MULTILINE)
 _TP_RE = re.compile(rf"\bTP\s*(\d*)\s*[:\-]?\s*{_NUM}", re.IGNORECASE)
 
 
@@ -77,15 +84,26 @@ def parse_signal(text: str) -> Optional[TradeSignal]:
         SL 4180
         TP1 4150
         TP2 4140
+    or:
+        🔴 SELL SIGNAL — XAUUSD.c (M1)
+        ✈️ Entry: 4011.13
+        🎯 TP1: 4006.31
+        ☠️ SL: 4015.95
     Returns a TradeSignal or None if the message doesn't match.
     """
     text = _normalize(text)
-    header = _HEADER_RE.search(text)
-    if not header:
-        return None
-    direction = header.group(1).upper()
-    first = _to_float(header.group(2))
-    entries = [first] if header.group(3) is None else [first, _complete_entry(header.group(3), first)]
+    entry_line = _ENTRY_LINE_RE.search(text)
+    direction_match = _DIRECTION_RE.search(text, 0, entry_line.start()) if entry_line else None
+    if entry_line and direction_match:
+        # "Entry:" line format; checked first so digits in the title (e.g. "(M1)") aren't read as the entry
+        direction, first_str, second_str = direction_match.group(1).upper(), entry_line.group(1), entry_line.group(2)
+    else:
+        header = _HEADER_RE.search(text)
+        if not header:
+            return None
+        direction, first_str, second_str = header.group(1).upper(), header.group(2), header.group(3)
+    first = _to_float(first_str)
+    entries = [first] if second_str is None else [first, _complete_entry(second_str, first)]
     ref = sum(entries) / len(entries)
 
     sl_match = _SL_RE.search(text)
