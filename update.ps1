@@ -16,7 +16,8 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $Dir = $PSScriptRoot
-$TaskName = "TrackingGold"
+# Named after the folder, like install_autostart.ps1, so each bot folder updates only its own bot
+$TaskName = Split-Path $Dir -Leaf
 $Exe = Join-Path $Dir "TrackingGold.exe"
 $PrevExe = Join-Path $Dir "TrackingGold.prev.exe"
 $VersionFile = Join-Path $Dir "version.txt"
@@ -45,10 +46,15 @@ if ($InstallSchedule) {
     return
 }
 
+# Only the TrackingGold.exe running from this folder: other bots on the same VPS are left alone
+function Get-BotProcess {
+    Get-Process TrackingGold -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe }
+}
+
 function Stop-Bot {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    Get-Process TrackingGold -ErrorAction SilentlyContinue | Stop-Process -Force
-    for ($i = 0; $i -lt 20 -and (Get-Process TrackingGold -ErrorAction SilentlyContinue); $i++) { Start-Sleep 1 }
+    Get-BotProcess | Stop-Process -Force
+    for ($i = 0; $i -lt 20 -and (Get-BotProcess); $i++) { Start-Sleep 1 }
 }
 
 function Start-Bot {
@@ -60,7 +66,7 @@ function Start-Bot {
 function Test-BotHealthy($since) {
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep 2
-        if (-not (Get-Process TrackingGold -ErrorAction SilentlyContinue)) { continue }
+        if (-not (Get-BotProcess)) { continue }
         if (Get-LogLinesSince "Listening to channel" $since 50) { return $true }
     }
     return $false
@@ -95,7 +101,7 @@ if (-not $Force) {
 # --- Download ---
 $asset = $release.assets | Where-Object { $_.name -like "TrackingGold-*.zip" } | Select-Object -First 1
 if (-not $asset) { throw "Release $($release.tag_name) has no TrackingGold-*.zip asset" }
-$tmp = Join-Path $env:TEMP "TrackingGold-update"
+$tmp = Join-Path $env:TEMP "$TaskName-update"  # per bot, so two bots can update at the same time
 Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $tmp | Out-Null
 $zip = Join-Path $tmp $asset.name
