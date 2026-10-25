@@ -19,6 +19,12 @@ SIGNALS = [
     # Abbreviated SL and an entry zone crossing a hundred
     ("SELL GOLD @ 4164-4167\nSL 418\nTP1 4150", "SELL", [4164, 4167], 4180),
     ("SELL GOLD 4198-02\nSL 4215", "SELL", [4198, 4202], 4215),
+    # Second channel: entry on its own line, emoji before every line, "(M1)" in the title
+    ("🔴 SELL SIGNAL — XAUUSD.c (M1)\n\n✈️ Entry: 4011.13\n🎯 TP1: 4006.31\n🎯 TP2: 4001.48\n"
+     "🎯 TP3: 3996.66\n☠️ SL: 4015.95", "SELL", [4011.13], 4015.95),
+    ("🟢 BUY SIGNAL — XAUUSD.c (M1)\n\n✈️ Entry: 4017.35\n🎯 TP1: 4026.16\n🎯 TP2: 4034.96\n"
+     "🎯 TP3: 4043.77\n☠️ SL: 4008.54", "BUY", [4017.35], 4008.54),
+    ("🟢 BUY SIGNAL — XAUUSD.c (H1)\nEntry: 4017.35 - 4015\nSL: 4008.54", "BUY", [4017.35, 4015], 4008.54),
 ]
 
 
@@ -47,7 +53,16 @@ IGNORED = [
     # SL on the wrong side of the entries
     "BUY GOLD 4160-4165\nSL 4170",
     "SELL GOLD 4160-4165\nSL 4150",
+    # Second channel format with a missing or wrong-side SL
+    "🔴 SELL SIGNAL — XAUUSD.c (M1)\n✈️ Entry: 4011.13\n🎯 TP1: 4006.31",
+    "🟢 BUY SIGNAL — XAUUSD.c (M1)\n✈️ Entry: 4017.35\n☠️ SL: 4020.00",
 ]
+
+
+def test_second_channel_take_profits():
+    signal = parse_signal("🔴 SELL SIGNAL — XAUUSD.c (M1)\n✈️ Entry: 4011.13\n🎯 TP1: 4006.31\n"
+                          "🎯 TP2: 4001.48\n🎯 TP3: 3996.66\n☠️ SL: 4015.95")
+    assert signal.take_profits == [4006.31, 4001.48, 3996.66]
 
 
 @pytest.mark.parametrize("text", IGNORED)
