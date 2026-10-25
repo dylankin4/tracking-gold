@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 SESSION_FILE = os.path.join(config.BASE_DIR, "tracking_session")
 
 
+def in_topic(message, topic_id: int) -> bool:
+    """True if a message of a forum group was posted in topic `topic_id`."""
+    reply = message.reply_to
+    in_some_topic = reply is not None and getattr(reply, "forum_topic", False)
+    if topic_id == 1:
+        # "General" topic: its messages carry no topic header
+        return not in_some_topic
+    if not in_some_topic:
+        return False
+    # A plain post in the topic points at the topic (reply_to_msg_id); a reply inside it carries reply_to_top_id
+    return (reply.reply_to_top_id or reply.reply_to_msg_id) == topic_id
+
+
 async def on_new_message(event):
     text = event.raw_text
     if not text:
@@ -141,16 +154,21 @@ async def run():
             raise SystemExit(1)
 
         # Resolve the channel entity first so Telethon caches it before filtering
-        raw = config.SIGNAL_CHANNEL
-        channel_ref = int(raw) if str(raw).lstrip("-").isdigit() else raw
-        channel = await _resolve_channel(client, channel_ref)
+        channel = await _resolve_channel(client, config.SIGNAL_CHAT)
         logger.info("Resolved channel: %s (id=%s)", getattr(channel, "title", channel), channel.id)
+        topic = config.SIGNAL_TOPIC
+        if topic is not None and not getattr(channel, "forum", False):
+            logger.warning("SIGNAL_CHANNEL has topic %s, but %s is not a group with topics", topic, channel.id)
 
         @client.on(events.NewMessage(chats=channel))
         async def handler(event):
+            if topic is not None and not in_topic(event.message, topic):
+                return
             await on_new_message(event)
 
-        logger.info("Listening to channel: %s", config.SIGNAL_CHANNEL)
+        logger.info(
+            "Listening to channel: %s%s", config.SIGNAL_CHAT, f" (topic {topic} only)" if topic is not None else "",
+        )
         monitor = asyncio.create_task(monitor_orders())
         try:
             await client.run_until_disconnected()

@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 
 from dotenv import load_dotenv
@@ -19,6 +20,23 @@ TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE", "")
 
 # Channel to monitor (username like @mychannel, or numeric ID like -1001234567890)
 SIGNAL_CHANNEL = os.getenv("SIGNAL_CHANNEL", "")
+
+
+def parse_channel(raw: str) -> tuple[int | str, int | None]:
+    """
+    Splits SIGNAL_CHANNEL into (chat, topic):
+      "-1001234567890"   -> (-1001234567890, None)   channel or group
+      "-1001234567890_9" -> (-1001234567890, 9)      only topic 9 of a forum group
+      "@mychannel"       -> ("@mychannel", None)
+    """
+    raw = raw.strip()
+    m = re.fullmatch(r"(-?\d+)(?:_(\d+))?", raw)
+    if m:
+        return int(m.group(1)), int(m.group(2)) if m.group(2) else None
+    return raw, None
+
+
+SIGNAL_CHAT, SIGNAL_TOPIC = parse_channel(SIGNAL_CHANNEL)
 
 # MT5
 MT5_LOGIN = int(os.getenv("MT5_LOGIN", "0"))
