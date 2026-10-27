@@ -89,6 +89,10 @@ except ValueError as e:
     TP_LADDER, TP_LADDER_ERROR = [(20.0, None)], f"SIGNAL_TP_LADDER '{TP_LADDER_SPEC}' is invalid: {e}"
 # Distance of the final TP from the entry
 FINAL_TP_DISTANCE = TP_LADDER[-1][0]
+# "ladder": exit on TP_LADDER above. "signal": exit on the signal's own TP1..TPn instead —
+#   TP1 close TP_LADDER_CLOSE_FRACTION, SL to entry | TP2 close the same share of the rest, SL to TP1
+#   | ... | last TP close everything (also the broker TP). Signals without usable TPs use TP_LADDER.
+TP_MODE = os.getenv("SIGNAL_TP_MODE", "ladder").strip().lower()
 # When both entries of a signal are open and entry 2 has taken profit on the ladder, move entry 1's
 # SL to entry 2's SL (only ever tighter). SIGNAL_SYNC_ENTRY1_SL=0 turns it off.
 SYNC_ENTRY1_SL = os.getenv("SIGNAL_SYNC_ENTRY1_SL", "1").strip().lower() not in ("0", "false", "no", "off")
@@ -127,6 +131,8 @@ def validate():
         problems.append("SIGNAL_LOT_SIZE must be > 0")
     if TP_LADDER_ERROR:
         problems.append(TP_LADDER_ERROR)
+    if TP_MODE not in ("ladder", "signal"):
+        problems.append(f"SIGNAL_TP_MODE must be 'ladder' or 'signal', not '{TP_MODE}'")
     if not 0 < TP_LADDER_CLOSE_FRACTION < 1:
         problems.append("SIGNAL_TP_LADDER_CLOSE_FRACTION must be between 0 and 1")
     if MT5_PATH and not os.path.isfile(MT5_PATH):
