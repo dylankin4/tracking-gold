@@ -89,6 +89,9 @@ except ValueError as e:
     TP_LADDER, TP_LADDER_ERROR = [(20.0, None)], f"SIGNAL_TP_LADDER '{TP_LADDER_SPEC}' is invalid: {e}"
 # Distance of the final TP from the entry
 FINAL_TP_DISTANCE = TP_LADDER[-1][0]
+# When both entries of a signal are open and entry 2 has taken profit on the ladder, move entry 1's
+# SL to entry 2's SL (only ever tighter). SIGNAL_SYNC_ENTRY1_SL=0 turns it off.
+SYNC_ENTRY1_SL = os.getenv("SIGNAL_SYNC_ENTRY1_SL", "1").strip().lower() not in ("0", "false", "no", "off")
 
 # If price already passed an entry, a market order is opened only when price is at least
 # this far from the SL; otherwise the passed entries are skipped
