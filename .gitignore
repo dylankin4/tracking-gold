@@ -6,6 +6,7 @@
 # Runtime output
 logs/
 *.log
+signal_tps.json*
 
 # Build output
 .venv/

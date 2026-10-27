@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import MetaTrader5 as mt5
 
 import mt5_terminal
+import tp_store
 from config import (
     DAILY_MAX_LOSS,
     DAILY_PROFIT_TARGET,
@@ -23,6 +24,7 @@ from config import (
     SYNC_ENTRY1_SL,
     TP_LADDER,
     TP_LADDER_CLOSE_FRACTION,
+    TP_MODE,
 )
 from message_parser import TradeSignal
 
@@ -95,9 +97,10 @@ def _market_filling_mode() -> int:
     return mt5.ORDER_FILLING_RETURN
 
 
-def _place_limit(signal: TradeSignal, price: float, tp_distance: float, expiry: datetime, comment: str) -> int | None:
+def _place_limit(signal: TradeSignal, price: float, tp_of, expiry: datetime, comment: str) -> int | None:
+    """`tp_of(entry_price)` gives the broker TP (the last step of the TP ladder)."""
     order_type = mt5.ORDER_TYPE_BUY_LIMIT if signal.direction == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
-    tp = _tp_for(price, signal.direction, tp_distance)
+    tp = tp_of(price)
     request = {
         "action": mt5.TRADE_ACTION_PENDING,
         "symbol": SYMBOL,
@@ -131,7 +134,7 @@ def _place_limit(signal: TradeSignal, price: float, tp_distance: float, expiry: 
     return result.order
 
 
-def _place_market(signal: TradeSignal, market_price: float, tp_distance: float, comment: str) -> int | None:
+def _place_market(signal: TradeSignal, market_price: float, tp_of, comment: str) -> int | None:
     order_type = mt5.ORDER_TYPE_BUY if signal.direction == "BUY" else mt5.ORDER_TYPE_SELL
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
@@ -140,7 +143,7 @@ def _place_market(signal: TradeSignal, market_price: float, tp_distance: float, 
         "type": order_type,
         "price": market_price,
         "sl": signal.stoploss,
-        "tp": _tp_for(market_price, signal.direction, tp_distance),
+        "tp": tp_of(market_price),
         "deviation": MARKET_DEVIATION_POINTS,
         "magic": MAGIC_NUMBER,
         "comment": comment,
@@ -157,9 +160,10 @@ def _place_market(signal: TradeSignal, market_price: float, tp_distance: float, 
         return None
 
     # Re-anchor TP on the actual fill price if it slipped from the requested price
+    # (a TP taken from the signal is a fixed price, so it stays where it is)
     fill_price = result.price or market_price
-    tp = _tp_for(fill_price, signal.direction, tp_distance)
-    if abs(fill_price - market_price) > 1e-9:
+    tp = tp_of(fill_price)
+    if abs(tp - request["tp"]) > 1e-9:
         modify = mt5.order_send({
             "action": mt5.TRADE_ACTION_SLTP,
             "symbol": SYMBOL,
@@ -257,6 +261,25 @@ def place_orders(signal: TradeSignal) -> list[int]:
     expiry = datetime.now(timezone.utc) + timedelta(hours=ORDER_EXPIRY_HOURS)
     group = datetime.now().strftime("%m%d%H%M%S")
 
+    # The ladder follows the signal's own TP1..TPn (SIGNAL_TP_MODE=signal) when they make sense for
+    # every entry; otherwise the fixed TP_LADDER. The last step is also the broker TP.
+    signal_tps = None
+    if TP_MODE == "signal":
+        if all(signal_tp_ladder(is_buy, price, signal.take_profits) for price in signal.entry_prices):
+            signal_tps = signal.take_profits
+            tp_store.save(_group_key(_comment(group, 0)), signal_tps)
+        else:
+            logger.warning(
+                "Signal TPs %s don't fit entries %s — using the fixed TP ladder for this signal",
+                signal.take_profits, signal.entry_prices,
+            )
+    if signal_tps:
+        def tp_of(price):
+            return signal_tps[-1]
+    else:
+        def tp_of(price):
+            return _tp_for(price, signal.direction, FINAL_TP_DISTANCE)
+
     # A BUY LIMIT must sit below the ask, a SELL LIMIT above the bid
     limit_entries, passed_entries = [], []
     for i, price in enumerate(signal.entry_prices):
@@ -266,7 +289,7 @@ def place_orders(signal: TradeSignal) -> list[int]:
 
     tickets = []
     for i, price in limit_entries:
-        ticket = _place_limit(signal, price, FINAL_TP_DISTANCE, expiry, _comment(group, i))
+        ticket = _place_limit(signal, price, tp_of, expiry, _comment(group, i))
         if ticket:
             tickets.append(ticket)
 
@@ -279,7 +302,7 @@ def place_orders(signal: TradeSignal) -> list[int]:
             )
             # The market order takes the place of the first passed entry
             first = passed_entries[0][0]
-            ticket = _place_market(signal, market_price, FINAL_TP_DISTANCE, _comment(group, first))
+            ticket = _place_market(signal, market_price, tp_of, _comment(group, first))
             if ticket:
                 tickets.append(ticket)
         else:
@@ -453,10 +476,47 @@ def _move_sl(pos, new_sl: float, digits: int) -> bool:
     return False
 
 
+def signal_tp_ladder(is_buy: bool, open_price: float, tps: list[float]) -> list[tuple[float, float | None]] | None:
+    """
+    Ladder built from a signal's own TPs, as (profit distance, SL offset) steps from `open_price`:
+      TP1 -> close part, SL to entry | TP2 -> close part, SL to TP1 | ... | last TP -> close the rest.
+    None if the TPs are missing or not all beyond the entry in increasing order.
+    """
+    distances = [tp - open_price if is_buy else open_price - tp for tp in tps]
+    if not distances or distances[0] <= 0 or any(b <= a for a, b in zip(distances, distances[1:])):
+        return None
+    ladder = [(d, 0.0 if i == 0 else distances[i - 1]) for i, d in enumerate(distances[:-1])]
+    ladder.append((distances[-1], None))
+    return ladder
+
+
+def _group_key(comment: str) -> str:
+    """'sig1027123456_e2' -> 'sig1027123456': the part shared by all orders of one signal."""
+    return comment.rsplit("_e", 1)[0]
+
+
+# Positions already reported as missing their signal TPs, so the warning is logged once
+_no_signal_tps: set[int] = set()
+
+
+def _ladder_for(pos, is_buy: bool) -> list[tuple[float, float | None]]:
+    """The signal's own TP ladder in SIGNAL_TP_MODE=signal (when its TPs were saved), else TP_LADDER."""
+    if TP_MODE == "signal":
+        tps = tp_store.get(_group_key(pos.comment))
+        ladder = signal_tp_ladder(is_buy, pos.price_open, tps) if tps else None
+        if ladder:
+            return ladder
+        if pos.ticket not in _no_signal_tps:
+            _no_signal_tps.add(pos.ticket)
+            logger.warning("No usable signal TPs for position %s (%s) — using the fixed TP ladder", pos.ticket, pos.comment)
+    return TP_LADDER
+
+
 def manage_profitable_positions() -> list[int]:
     """
-    Runs the take-profit ladder (TP_LADDER) on every open position of ours: at each profit
-    level, closes part of the position and moves the SL up; the last level closes the rest.
+    Runs the take-profit ladder on every open position of ours: at each profit level, closes
+    part of the position and moves the SL up; the last level closes the rest. The ladder is
+    TP_LADDER, or the position's own signal TPs in SIGNAL_TP_MODE=signal.
     Returns the tickets that were changed.
     """
     positions = [p for p in (mt5.positions_get(symbol=SYMBOL) or ()) if p.magic == MAGIC_NUMBER]
@@ -477,20 +537,21 @@ def manage_profitable_positions() -> list[int]:
             continue
         is_buy = pos.type == mt5.POSITION_TYPE_BUY
         price = tick.bid if is_buy else tick.ask
+        ladder = _ladder_for(pos, is_buy)
         action = ladder_action(
             is_buy, pos.price_open, price, pos.volume, pos.sl, entry_volume,
-            TP_LADDER, TP_LADDER_CLOSE_FRACTION, info.volume_step, info.volume_min,
+            ladder, TP_LADDER_CLOSE_FRACTION, info.volume_step, info.volume_min,
         )
         if action is None:
             continue
         step, lots, new_sl = action
-        level = TP_LADDER[step][0]
+        level = ladder[step][0]
 
         logger.info(
             "TP ladder step %d/%d (+%g): %s position %s opened @ %.2f is %.2f in profit — close %s of %s lots%s",
-            step + 1, len(TP_LADDER), level, "BUY" if is_buy else "SELL", pos.ticket, pos.price_open,
+            step + 1, len(ladder), round(level, 2), "BUY" if is_buy else "SELL", pos.ticket, pos.price_open,
             abs(price - pos.price_open), lots, pos.volume,
-            f", SL -> entry {'+' if is_buy else '-'}{TP_LADDER[step][1]:g}" if new_sl is not None else "",
+            f", SL -> {new_sl:.2f}" if new_sl is not None else "",
         )
         if lots > 0:
             closing_all = lots >= pos.volume - info.volume_step / 2
