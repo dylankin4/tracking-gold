@@ -20,6 +20,7 @@ from config import (
     MT5_SERVER,
     ORDER_EXPIRY_HOURS,
     SYMBOL,
+    SYNC_ENTRY1_SL,
     TP_LADDER,
     TP_LADDER_CLOSE_FRACTION,
 )
@@ -508,6 +509,57 @@ def manage_profitable_positions() -> list[int]:
                 changed.append(pos.ticket)
         _ladder_failures.pop(pos.ticket, None)
     return changed
+
+
+def synced_entry1_sl(is_buy: bool, entry1_sl: float, entry2_sl: float) -> float | None:
+    """Entry 2's SL if it is tighter than entry 1's (never loosens entry 1), else None."""
+    if entry2_sl <= 0:
+        return None
+    if entry1_sl <= 0 or (entry2_sl > entry1_sl if is_buy else entry2_sl < entry1_sl):
+        return entry2_sl
+    return None
+
+
+def sync_entry1_sl_to_entry2() -> list[int]:
+    """
+    When both entries of a signal are open and entry 2 has already taken profit on the TP ladder
+    (part of it closed, SL moved up), moves entry 1's SL to entry 2's SL. Entry 2 has the better
+    price, so it reaches each ladder step first. Returns the entry 1 tickets whose SL was moved.
+    """
+    if not SYNC_ENTRY1_SL:
+        return []
+    positions = [p for p in (mt5.positions_get(symbol=SYMBOL) or ()) if p.magic == MAGIC_NUMBER]
+    by_comment = {p.comment: p for p in positions}
+    info = mt5.symbol_info(SYMBOL)
+    if info is None:
+        return []
+
+    moved = []
+    now = time.monotonic()
+    for e2 in positions:
+        if not (e2.comment.startswith("sig") and e2.comment.endswith("_e2")):
+            continue
+        e1 = by_comment.get(e2.comment[:-1] + "1")
+        if e1 is None or e1.type != e2.type:
+            continue
+        # Only once entry 2 has taken profit (some lots closed), not just because its SL differs
+        entry_volume = _entry_volume(e2.ticket)
+        if entry_volume is None or e2.volume >= entry_volume - info.volume_step / 2:
+            continue
+        if now - _ladder_failures.get(e1.ticket, -_LADDER_RETRY_SECONDS) < _LADDER_RETRY_SECONDS:
+            continue
+        new_sl = synced_entry1_sl(e1.type == mt5.POSITION_TYPE_BUY, e1.sl, e2.sl)
+        if new_sl is None:
+            continue
+        logger.info(
+            "Entry 2 (%s) has taken profit — moving entry 1 (%s) SL %.2f -> %.2f to match it",
+            e2.ticket, e1.ticket, e1.sl, new_sl,
+        )
+        if _move_sl(e1, new_sl, info.digits):
+            moved.append(e1.ticket)
+        else:
+            _ladder_failures[e1.ticket] = now
+    return moved
 
 
 def _entry1_closed_at_tp(order, entry1_comment: str) -> bool:
